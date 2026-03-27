@@ -1,0 +1,16 @@
+[project]
+name = "copd-voice-analysis"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11, <3.13"
+dependencies = [
+    "joblib>=1.5.3",
+    "matplotlib>=3.10.8",
+    "pandas>=3.0.1",
+    "praat-parselmouth>=0.4.7",
+    "scikit-learn>=1.8.0",
+    "seaborn>=0.13.2",
+    "soundfile>=0.13.1",
+]
+

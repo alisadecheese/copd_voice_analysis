@@ -1,0 +1,6 @@
+.ruff_cache/
+.venv/
+data/
+logs.log
+copd_multimodel.pkl
+src/__pycache__/
