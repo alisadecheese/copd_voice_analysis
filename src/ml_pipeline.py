@@ -4,7 +4,8 @@ from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.svm import SVC
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import StratifiedKFold, cross_val_score
+from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import GroupKFold, cross_val_score
 from sklearn.metrics import (
     f1_score,
     accuracy_score,
@@ -62,70 +63,68 @@ class COPDClassifierMultiModel:
         self.best_model = None
         self.model_results = {}
 
-    def train(self, X, y, feature_names=None, n_splits=5):
-        """
-        Parameters:
-        -----------
-        X : array-like, shape (n_samples, n_features)
-            Признаки
-        y : array-like, shape (n_samples,)
-            Метки классов
-        feature_names : list, optional
-            Имена признаков для интерпретируемости
-        n_splits : int, default=5
-            Количество фолдов для кросс-валидации
-        """
+    
+    def train(self, X, y, groups=None, feature_names=None, n_splits=5):
+        
         print("Масштабирование признаков...")
         X_scaled = self.scaler.fit_transform(X)
         self.feature_names = feature_names
-
-        # Настройка кросс-валидации
-        skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
+        
+        # ПРОВЕРКА НА ГРУППЫ
+        if groups is None:
+            print(" Предупреждение: groups не переданы! Используем обычную кросс-валидацию.")
+            from sklearn.model_selection import StratifiedKFold
+            skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
+            cv_groups = None
+        else:
+            print(f"👥 Используется GroupKFold (учет пациентов): {len(set(groups))} уникальных пациентов")
+            skf = GroupKFold(n_splits=n_splits)
+            cv_groups = groups
+        
+        # Адаптация n_splits под количество групп
+        if groups is not None:
+            unique_groups = len(set(groups))
+            if n_splits > unique_groups:
+                print(f"⚠️ n_splits={n_splits} больше числа пациентов ({unique_groups}). Уменьшено до {unique_groups}")
+                n_splits = unique_groups
+                skf = GroupKFold(n_splits=n_splits)
+        
         scoring = make_scorer(f1_score)
-
-        print(f"Обучение и оценка {len(self.models)} моделей (CV={n_splits})...\n")
-
+        
+        print(f"🧠 Обучение и оценка {len(self.models)} моделей (CV={n_splits})...\n")
+        
         for name, model in self.models.items():
-            print(f" Обучение модели: {name}")
-
-            # Кросс-валидация
-            cv_scores = cross_val_score(model, X_scaled, y, cv=skf, scoring=scoring)
-
-            # Расчет статистики
+            print(f"  • Обучение модели: {name}")
+            
+            # 🔴 ПЕРЕДАЕМ groups В cross_val_score
+            cv_scores = cross_val_score(model, X_scaled, y, cv=skf, scoring=scoring, groups=cv_groups)
+            
             median_score = np.median(cv_scores)
-            ci = stats.t.interval(
-                0.95, len(cv_scores) - 1, loc=median_score, scale=stats.sem(cv_scores)
-            )
-
-            # Сохранение результатов
+            n_scores = len(cv_scores)
+            if n_scores >= 3 and np.std(cv_scores) > 0:
+                ci = stats.t.interval(0.95, n_scores-1, loc=median_score, scale=stats.sem(cv_scores))
+                ci_lower, ci_upper = ci[0], ci[1]
+            else:
+                ci_lower, ci_upper = float('nan'), float('nan')
+            
             self.model_results[name] = {
-                "cv_scores": cv_scores,
-                "median_f1": median_score,
-                "ci_lower": ci[0],
-                "ci_upper": ci[1],
-                "mean_accuracy": np.mean(
-                    cross_val_score(model, X_scaled, y, cv=skf, scoring="accuracy")
-                ),
-                "model": model,
+                'cv_scores': cv_scores,
+                'median_f1': median_score,
+                'ci_lower': ci_lower,
+                'ci_upper': ci_upper,
+                'mean_accuracy': np.mean(cross_val_score(model, X_scaled, y, cv=skf, scoring='accuracy', groups=cv_groups)),
+                'model': model
             }
-
-            print(
-                f"    F1 (median): {median_score:.4f}, 95% CI: [{ci[0]:.4f}, {ci[1]:.4f}]"
-            )
-
-            # Финальное обучение модели на всех данных
+            
+            print(f"    F1 (median): {median_score:.4f}, 95% CI: [{ci_lower:.4f}, {ci_upper:.4f}]")
             model.fit(X_scaled, y)
-
-        # Выбор лучшей модели
-        self.best_model_name = max(
-            self.model_results.keys(), key=lambda k: self.model_results[k]["median_f1"]
-        )
-        self.best_model = self.model_results[self.best_model_name]["model"]
+        
+        self.best_model_name = max(self.model_results.keys(), 
+                                   key=lambda k: self.model_results[k]['median_f1'])
+        self.best_model = self.model_results[self.best_model_name]['model']
         self.is_fitted = True
-
-        print(
-            f"\nЛучшая модель: {self.best_model_name} (F1={self.model_results[self.best_model_name]['median_f1']:.4f})"
-        )
+        
+        print(f"\n✅ Лучшая модель: {self.best_model_name} (F1={self.model_results[self.best_model_name]['median_f1']:.4f})")
         return self
 
     def predict(self, X, use_best=True, model_name=None):
