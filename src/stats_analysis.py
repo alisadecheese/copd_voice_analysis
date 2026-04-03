@@ -14,7 +14,7 @@ class StatisticalAnalyzer:
     def calculate_median_ci(
         self, data: np.ndarray
     ) -> Tuple[float, Tuple[float, float]]:
-        """Медиана + доверительный интервал """
+        """Медиана + доверительный интервал"""
         if len(data) == 0 or np.all(np.isnan(data)):
             return np.nan, (np.nan, np.nan)
 
@@ -27,7 +27,7 @@ class StatisticalAnalyzer:
             sample = np.random.choice(data, size=len(data), replace=True)
             bootstrapped_medians.append(np.median(sample))
 
-        # Перцентили [2.5; 97.5] 
+        # Перцентили [2.5; 97.5]
         lower_p = (1 - self.confidence_level) / 2 * 100
         upper_p = (1 + self.confidence_level) / 2 * 100
         ci_lower = np.percentile(bootstrapped_medians, lower_p)
