@@ -1,18 +1,21 @@
 [project]
 name = "copd-voice-analysis"
 version = "0.1.0"
-description = "Add your description here"
+description = "Диагностика ХОБЛ по голосу с использованием машинного обучения"
 readme = "README.md"
 requires-python = ">=3.11, <3.13"
 dependencies = [
-    "joblib>=1.5.3",
-    "librosa>=0.11.0",
-    "matplotlib>=3.10.8",
-    "openpyxl>=3.1.5",
-    "pandas>=3.0.1",
-    "praat-parselmouth>=0.4.7",
-    "scikit-learn>=1.8.0",
-    "seaborn>=0.13.2",
-    "soundfile>=0.13.1",
+    "numpy>=1.24.0,<2.0.0",
+    "pandas>=2.0.0,<3.0.0",
+    "scipy>=1.10.0,<2.0.0",
+    "scikit-learn>=1.3.0,<2.0.0",
+    "praat-parselmouth>=0.4.0,<1.0.0",
+    "soundfile>=0.12.0,<1.0.0",
+    "librosa>=0.10.0,<1.0.0",
+    "openpyxl>=3.1.0,<4.0.0",
+    "pydub>=0.25.1,<1.0.0",
+    "imbalanced-learn>=0.11.0,<1.0.0",
+    "matplotlib>=3.7.0,<4.0.0",
+    "seaborn>=0.12.0,<1.0.0",
+    "opensmile>=2.5.0",
 ]
-
