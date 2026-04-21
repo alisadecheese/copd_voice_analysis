@@ -30,7 +30,7 @@ except ImportError:
 warnings.filterwarnings("ignore")
 
 
-class VoiceFeatureExtractor:
+class FeatureExtractor:
     """Извлечение акустических признаков для диагностики ХОБЛ"""
 
     def __init__(self, sampling_rate: int = 16000):

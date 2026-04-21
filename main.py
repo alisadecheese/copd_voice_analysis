@@ -1,191 +1,119 @@
-import sys, os, pandas as pd, numpy as np
-from scipy import stats
-from imblearn.over_sampling import SMOTE
-from collections import Counter
-import matplotlib.pyplot as plt
-import seaborn as sns
+# main.py
+import os
+import sys
+import joblib
+import pandas as pd
+import numpy as np
+import warnings
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.svm import SVC
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import classification_report, roc_auc_score, confusion_matrix
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
-from src.feature_extractor import VoiceFeatureExtractor
-from src.ml_pipeline import COPDClassifierMultiModel
+warnings.filterwarnings('ignore')
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
+from src.feature_extractor import FeatureExtractor
+from src.multicollinearity_check import run_analysis  # ← только этот импорт добавлен
 
-def create_statistics_table(X, y, groups, feature_names, output_file="speech_statistics.xlsx"):
-    """Создание таблицы статистики"""
+DATA_DIR = "data"
+FEATURES_RAW = "data/features_raw.csv"
+FEATURES_CLEAN = "data/features_cleaned.csv"
+MODEL_DIR = "models"
+MODEL_PATH = os.path.join(MODEL_DIR, "copd_model.pkl")
+
+def train_pipeline():
+    print("🎤 1. Извлечение признаков...")
+    extractor = FeatureExtractor()
+    X, y = extractor.prepare_dataset(DATA_DIR)
+    print(f"   ✅ Загружено: {X.shape[0]} записей, {X.shape[1]} признаков")
     
-    n_features_data = X.shape[1]
-    if len(feature_names) < n_features_data:
-        feature_names += [f"feature_{len(feature_names)+i}" for i in range(n_features_data - len(feature_names))]
-    elif len(feature_names) > n_features_data:
-        feature_names = feature_names[:n_features_data]
-
-    df = pd.DataFrame(X, columns=feature_names)
-    df['group'] = ['До лечения' if label == 1 else 'После лечения' for label in y]
+    # 🔽 БЛОК 1: ФИЛЬТРАЦИЯ МУЛЬТИКОЛЛИНЕАРНОСТИ (только это добавлено)
+    print("🔍 2. Фильтрация мультиколлинеарности (VIF)...")
+    df_raw = X.copy()
+    df_raw["label"] = y
+    df_raw.to_csv(FEATURES_RAW, index=False)
     
-    if len(groups) == len(df):
-        df['patient_id'] = groups
-    else:
-        df['patient_id'] = [f"patient_{i}" for i in range(len(df))]
-
-    statistics = []
-    n_before = len(df[df['group'] == 'До лечения'])
-    n_after = len(df[df['group'] == 'После лечения'])
-
-    for feature in feature_names:
-        g0 = df[df['group'] == 'До лечения'][feature]
-        g1 = df[df['group'] == 'После лечения'][feature]
-        
-        med0, med1 = g0.median(), g1.median()
-        
-        ci0 = f"[{stats.t.interval(0.95, len(g0)-1, loc=med0, scale=stats.sem(g0))[0]:.2f}; {stats.t.interval(0.95, len(g0)-1, loc=med0, scale=stats.sem(g0))[1]:.2f}]" if len(g0) > 1 else "[N/A; N/A]"
-        ci1 = f"[{stats.t.interval(0.95, len(g1)-1, loc=med1, scale=stats.sem(g1))[0]:.2f}; {stats.t.interval(0.95, len(g1)-1, loc=med1, scale=stats.sem(g1))[1]:.2f}]" if len(g1) > 1 else "[N/A; N/A]"
-
-        p_str = "N/A"
-        try:
-            if len(g0) > 1 and len(g1) > 1:
-                g0_clean = g0.replace([np.inf, -np.inf], np.nan).dropna()
-                g1_clean = g1.replace([np.inf, -np.inf], np.nan).dropna()
-                if len(g0_clean) > 1 and len(g1_clean) > 1 and g0_clean.std() > 0.0001 and g1_clean.std() > 0.0001:
-                    _, p_val = stats.ttest_ind(g0_clean, g1_clean, equal_var=False)
-                    p_str = f"{p_val:.4f}"
-        except Exception:
-            p_str = "N/A"
-
-        statistics.append({
-            'Показатель': feature,
-            f'1 (n={n_before})': f"{med0:.2f} {ci0}",
-            f'2 (n={n_after})': f"{med1:.2f} {ci1}",
-            'p-value': p_str
-        })
-
-    stats_df = pd.DataFrame(statistics)
-    stats_df.to_excel(output_file, index=False)
-    print(f"💾 Таблица сохранена в {output_file}")
-    print("\n" + "="*100 + "\n📊 ТАБЛИЦА СТАТИСТИКИ\n" + "="*100)
-    print(stats_df.to_string(index=False))
-    print("="*100)
-    return stats_df
-
-
-def paired_analysis(X, y, groups, feature_names):
-    """Парный анализ для пациентов с обеими записями"""
-    print("\n🔍 ПАРНЫЙ АНАЛИЗ (пациенты с ДО и ПОСЛЕ)")
-    print("="*80)
+    X_clean, _, dropped = run_analysis(
+        FEATURES_RAW,
+        target_col="label",
+        corr_threshold=0.85,
+        vif_threshold=5.0
+    )
+    print(f"   🗑️ Удалено {len(dropped)} коррелирующих признаков")
     
-    patient_counts = Counter(groups)
-    paired_patients = [pid for pid, cnt in patient_counts.items() if cnt == 2]
-    print(f"Найдено парных пациентов: {len(paired_patients)}")
+    df_clean = X_clean.copy()
+    df_clean["label"] = y
+    df_clean.to_csv(FEATURES_CLEAN, index=False)
+    # 🔼 КОНЕЦ БЛОКА 1
     
-    if len(paired_patients) < 5:
-        print("⚠️ Мало парных записей для надёжного анализа")
-        return []
+    print("📊 3. Разделение и масштабирование...")
+    X_train, X_test, y_train, y_test = train_test_split(
+        X_clean, y, test_size=0.2, stratify=y, random_state=42
+    )
     
-    print(f"ID парных пациентов: {paired_patients[:10]}")
+    scaler = StandardScaler()
+    X_train_sc = scaler.fit_transform(X_train)
+    X_test_sc = scaler.transform(X_test)
     
-    # Собираем данные для парного t-теста
-    print("\n📊 РЕЗУЛЬТАТЫ ПАРНОГО T-ТЕСТА")
-    print("-"*80)
+    print("🔧 4. Обучение моделей...")
+    models = {
+        "RF": RandomForestClassifier(n_estimators=300, max_depth=8, 
+                                     class_weight='balanced',  # ← БЛОК 2: учёт имбаланса
+                                     random_state=42, n_jobs=-1),
+        "SVM": SVC(kernel='rbf', probability=True, class_weight='balanced', random_state=42),
+        "LR": LogisticRegression(class_weight='balanced', max_iter=1000, random_state=42)
+    }
     
-    significant_paired = []
+    best_model, best_auc = None, -1
+    for name, model in models.items():
+        model.fit(X_train_sc, y_train)
+        probs = model.predict_proba(X_test_sc)[:, 1]
+        auc = roc_auc_score(y_test, probs)
+        print(f"   {name}: AUC = {auc:.4f}")
+        if auc > best_auc:
+            best_auc, best_model = auc, model
     
-    for i, feat in enumerate(feature_names):
-        before_vals, after_vals = [], []
-        
-        for pid in paired_patients:
-            # Находим индексы этого пациента
-            idx = [j for j, g in enumerate(groups) if g == pid]
-            
-            if len(idx) == 2:
-                # Определяем какой "до" (y=1), какой "после" (y=0)
-                if y[idx[0]] == 1 and y[idx[1]] == 0:
-                    before_vals.append(X[idx[0], i])
-                    after_vals.append(X[idx[1], i])
-                elif y[idx[0]] == 0 and y[idx[1]] == 1:
-                    before_vals.append(X[idx[1], i])
-                    after_vals.append(X[idx[0], i])
-                # else: метки не соответствуют ожидаемым (1 и 0)
-        
-        if len(before_vals) >= 5:
-            try:
-                stat, p_val = stats.ttest_rel(before_vals, after_vals)
-                
-                # Показываем все p < 0.1 для отладки
-                if p_val < 0.1:
-                    print(f"  {'✅' if p_val < 0.05 else '⚠️'} {feat}: p = {p_val:.4f} (парный, n={len(before_vals)})")
-                
-                if p_val < 0.05:
-                    significant_paired.append((feat, p_val))
-            except Exception as e:
-                pass
+    print("📈 5. Оценка лучшей модели...")
+    y_pred = best_model.predict(X_test_sc)
+    probs = best_model.predict_proba(X_test_sc)[:, 1]
     
-    print(f"\n📈 ВСЕГО ЗНАЧИМЫХ В ПАРНОМ АНАЛИЗЕ (p < 0.05): {len(significant_paired)} из {len(feature_names)}")
-    print("="*80)
+    print(classification_report(y_test, y_pred, target_names=["После (0)", "До (1)"]))
+    print(f"ROC-AUC: {roc_auc_score(y_test, probs):.4f}")
+    print(f"Confusion Matrix:\n{confusion_matrix(y_test, y_pred)}")
     
-    return significant_paired
+    print("💾 6. Сохранение...")
+    os.makedirs(MODEL_DIR, exist_ok=True)
+    joblib.dump({
+        "model": best_model,
+        "scaler": scaler,
+        "feature_cols": X_clean.columns.tolist()
+    }, MODEL_PATH)
+    print(f"   ✅ Сохранено в {MODEL_PATH}")
 
-
-def create_feature_plots(X, y, feature_names, stats_df, output_dir="figures"):
-    """Создание графиков для значимых признаков"""
-    os.makedirs(output_dir, exist_ok=True)
-    
-    # Находим значимые признаки
-    significant = []
-    for _, row in stats_df.iterrows():
-        p_val = row['p-value']
-        if p_val != 'N/A' and float(p_val) < 0.05:
-            significant.append(row['Показатель'])
-    
-    print(f"\n📈 СОЗДАНИЕ ГРАФИКОВ ДЛЯ {len(significant)} ЗНАЧИМЫХ ПРИЗНАКОВ")
-    print("-"*80)
-    
-    for feat in significant[:5]:  # Топ-5 значимых
-        if feat in feature_names:
-            idx = feature_names.index(feat)
-            feat_data = X[:, idx]
-            
-            plt.figure(figsize=(10, 6))
-            df_plot = pd.DataFrame({
-                'Значение': feat_data,
-                'Группа': ['До лечения' if l == 1 else 'После' for l in y]
-            })
-            
-            sns.boxplot(data=df_plot, x='Группа', y='Значение', palette='Set2', showfliers=False)
-            sns.stripplot(data=df_plot, x='Группа', y='Значение', color='black', alpha=0.4, size=4, jitter=0.1)
-            
-            p_val = stats_df[stats_df['Показатель'] == feat]['p-value'].values[0]
-            plt.title(f'{feat}\n(p = {p_val})', fontsize=12, fontweight='bold')
-            plt.ylabel('Значение признака', fontsize=11)
-            plt.xlabel('', fontsize=11)
-            plt.grid(axis='y', alpha=0.3)
-            plt.tight_layout()
-            
-            # Сохраняем с безопасным именем
-            safe_name = "".join(c if c.isalnum() else '_' for c in feat[:50])
-            filepath = os.path.join(output_dir, f'{safe_name}.png')
-            plt.savefig(filepath, dpi=300, bbox_inches='tight')
-            plt.close()
-            print(f"  ✅ {filepath}")
-
-
-def predict_new_files(classifier, analyzer, folder_path):
-    """Предсказание для новых пациентов"""
-    if not os.path.exists(folder_path):
+def predict_files(file_paths):
+    if not os.path.exists(MODEL_PATH):
+        print("❌ Модель не найдена. Запустите обучение: python main.py")
         return
-    print("\n🧪 ПРЕДСКАЗАНИЕ ДЛЯ НОВЫХ ПАЦИЕНТОВ")
-    for filename in sorted([f for f in os.listdir(folder_path) if f.endswith('.wav')]):
-        file_path = os.path.join(folder_path, filename)
-        sound, _, _ = analyzer.load_audio(file_path)
-        if sound:
-            feats = analyzer.extract_features(sound, None, None, file_path)
-            if feats and feats.get("valid"):
-                for k, v in feats.items():
-                    if isinstance(v, float) and np.isnan(v):
-                        feats[k] = 0.0
-                X_new = [[feats.get(col, 0.0) for col in classifier.feature_names]]
-                pred = classifier.predict(X_new)[0]
-                proba = classifier.predict_proba(X_new)[0][1]
-                status = "🔴 ХОБЛ" if pred == 1 else "🟢 Здоров"
-                print(f"  {filename}: {status} ({proba:.2%})")
+    cfg = joblib.load(MODEL_PATH)
+    extractor = FeatureExtractor()
+    print("\n🔎 Прогноз:")
+    for fp in file_paths:
+        feats = extractor.extract_single_file(fp)
+        df = pd.DataFrame([feats]).reindex(columns=cfg["feature_cols"], fill_value=0)
+        X_sc = cfg["scaler"].transform(df)
+        prob = cfg["model"].predict_proba(X_sc)[0, 1]
+        label = 1 if prob > 0.5 else 0
+        status = "🔴 ХОБЛ" if label == 1 else "🟢 Здоров"
+        print(f"  {os.path.basename(fp)}: {status} ({prob*100:.2f}%)")
+
+if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "predict":
+        predict_files(sys.argv[2:])
+    else:
+        train_pipeline()
 
 
 if __name__ == "__main__":
@@ -195,9 +123,12 @@ if __name__ == "__main__":
     groups = analyzer.patient_groups
 
     if len(X) > 0:
+
+
+
         # ФИЛЬТРАЦИЯ
         non_zero = [i for i, col in enumerate(analyzer.feature_columns) 
-                   if len(np.unique(X[:, i])) > 3 and np.var(X[:, i]) > 0.001]
+                    if len(np.unique(X[:, i])) > 3 and np.var(X[:, i]) > 0.001]
         X_filtered = X[:, non_zero]
         feature_names = [analyzer.feature_columns[i] for i in non_zero]
         print(f"✅ Осталось признаков: {len(feature_names)}")
