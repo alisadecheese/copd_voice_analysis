@@ -13,19 +13,27 @@ import pickle
 class COPDClassifierMultiModel:
     """Мульти-модель для классификации ХОБЛ"""
 
-    def __init__(self):
+    def __init__(self, class_weight='balanced'):
         self.scaler = RobustScaler()
+        
+        # 🔴 БОЛЕЕ АГРЕССИВНАЯ БАЛАНСИРОВКА
+        if class_weight == 'balanced':
+            # Автоматическая балансировка с уклоном к меньшему классу
+            self.class_weight = 'balanced'
+        elif isinstance(class_weight, dict):
+            self.class_weight = class_weight
+        else:
+            self.class_weight = {0: 1.5, 1: 1.0}  # Здоровых "штрафуем" больше
+        
         self.models = {
-            'SVM': SVC(kernel='rbf', C=1.0, gamma='scale', class_weight='balanced', probability=True, random_state=42),
-            'LogisticRegression': LogisticRegression(max_iter=1000, C=0.1, class_weight='balanced', solver='lbfgs', random_state=42),
-            'RandomForest': RandomForestClassifier(n_estimators=50, max_depth=5, min_samples_split=10, class_weight='balanced', random_state=42),
+            'SVM': SVC(kernel='rbf', C=1.0, gamma='scale', class_weight=self.class_weight, probability=True, random_state=42),
+            'LogisticRegression': LogisticRegression(max_iter=1000, C=0.5, class_weight=self.class_weight, solver='lbfgs', random_state=42),
+            'RandomForest': RandomForestClassifier(n_estimators=50, max_depth=5, min_samples_split=10, class_weight=self.class_weight, random_state=42),
             'KNN': KNeighborsClassifier(n_neighbors=7, weights='distance'),
         }
         self.model_results = {}
-        self.best_model = None
         self.best_model_name = None
-        self.feature_names = None
-        self.is_fitted = False
+        self.feature_names = []
 
     def train(self, X, y, groups=None, feature_names=None, n_splits=5):
         """Обучение моделей"""
@@ -62,6 +70,13 @@ class COPDClassifierMultiModel:
             self.is_fitted = True
             print(f"\n✅ Лучшая модель: {self.best_model_name}")
         return self
+        from sklearn.calibration import CalibratedClassifierCV
+
+        # Калибровка лучшей модели
+        best_model = self.models[self.best_model_name]
+        calibrated = CalibratedClassifierCV(best_model, method='sigmoid', cv=5)
+        calibrated.fit(X_train_scaled, y_train)
+        self.models[self.best_model_name] = calibrated
 
     def predict(self, X, use_best=True):
         if not self.is_fitted:

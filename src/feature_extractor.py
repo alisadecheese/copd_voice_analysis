@@ -5,20 +5,12 @@ import pandas as pd
 from scipy import stats, signal
 import warnings
 import os
-import tempfile
 
 try:
     import librosa
     LIBROSA_AVAILABLE = True
 except ImportError:
     LIBROSA_AVAILABLE = False
-
-try:
-    import opensmile
-    OPENSMILE_AVAILABLE = True
-except ImportError:
-    OPENSMILE_AVAILABLE = False
-    print("Warning: openSMILE not installed - eGeMAPS will be unavailable")
 
 try:
     from pydub import AudioSegment
@@ -30,7 +22,7 @@ except ImportError:
 warnings.filterwarnings("ignore")
 
 
-class FeatureExtractor:
+class VoiceFeatureExtractor:
     """Извлечение акустических признаков для диагностики ХОБЛ"""
 
     def __init__(self, sampling_rate: int = 16000):
@@ -39,71 +31,19 @@ class FeatureExtractor:
         self.pitch_ceiling = 300
         self.feature_columns = []
         self.patient_groups = []
-        
-        if OPENSMILE_AVAILABLE:
-            self.smile = opensmile.Smile(
-                feature_set=opensmile.FeatureSet.eGeMAPSv02,
-                feature_level=opensmile.FeatureLevel.Functionals,
-            )
 
     def load_audio(self, path: str) -> tuple:
-        """Загрузка аудиофайла"""
+        """Загрузка аудиофайла (без создания временных файлов)"""
         try:
-            if PYDUB_AVAILABLE:
-                try:
-                    trimmed_path = self.trim_silence(path)
-                    data, sr = sf.read(trimmed_path)
-                except Exception:
-                    data, sr = sf.read(path)
-            else:
-                data, sr = sf.read(path)
-                
+            data, sr = sf.read(path)
             if len(data.shape) > 1:
                 data = data.mean(axis=1)
             return parselmouth.Sound(data, sr), data, sr
         except Exception:
             return None, None, None
 
-    def trim_silence(self, audio_path, output_path=None):
-        """Удаление тишины в начале и конце файла"""
-        try:
-            sound = AudioSegment.from_file(audio_path)
-            non_silent = detect_nonsilent(sound, min_silence_len=200, silence_thresh=-40)
-            
-            if non_silent:
-                trimmed = sound[non_silent[0][0]:non_silent[-1][1]]
-                if output_path:
-                    trimmed.export(output_path, format='wav')
-                    return output_path
-                else:
-                    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
-                    trimmed.export(temp_file.name, format='wav')
-                    return temp_file.name
-        except Exception:
-            pass
-        
-        return audio_path
-
-    def extract_egemaps_features(self, audio_path):
-        """Извлечение eGeMAPS признаков через openSMILE (88 параметров)"""
-        features = {}
-        
-        if not OPENSMILE_AVAILABLE or not audio_path:
-            return features
-        
-        try:
-            y = self.smile.process_file(audio_path)
-            
-            for i, col in enumerate(y.columns):
-                features[f"egemaps_{i:02d}_{col}"] = float(y[col].values[0])
-                
-        except Exception as e:
-            print(f"  openSMILE error: {e}")
-        
-        return features
-
     def extract_features(self, sound, audio_values=None, sr=None, audio_path=None):
-        """Извлечение акустических признаков (28 признаков)"""
+        """Извлечение признаков (БЕЗ Jitter/Shimmer — они не работают для ХОБЛ)"""
         features = {}
         
         if sound is None or sound.xmax < 0.3:
@@ -111,7 +51,11 @@ class FeatureExtractor:
             return features
         
         try:
-            # 1. PITCH признаки (5 признаков)
+            # 1. PITCH признаки
+            pitch = None
+            pitch_values = []
+            voiced_frames = []
+            
             try:
                 pitch = sound.to_pitch(pitch_floor=self.pitch_floor, pitch_ceiling=self.pitch_ceiling)
                 pitch_values = pitch.selected_array["frequency"]
@@ -124,68 +68,13 @@ class FeatureExtractor:
                     features["max_pitch"] = float(np.max(voiced_frames))
                     features["pitch_range"] = float(np.max(voiced_frames) - np.min(voiced_frames))
                 else:
-                    for k in ["mean_pitch", "std_pitch", "min_pitch", "max_pitch", "pitch_range"]:
-                        features[k] = 0.0
+                    features["mean_pitch"] = features["std_pitch"] = features["min_pitch"] = 0.0
+                    features["max_pitch"] = features["pitch_range"] = 0.0
             except Exception:
-                for k in ["mean_pitch", "std_pitch", "min_pitch", "max_pitch", "pitch_range"]:
-                    features[k] = 0.0
+                features["mean_pitch"] = features["std_pitch"] = features["min_pitch"] = 0.0
+                features["max_pitch"] = features["pitch_range"] = 0.0
             
-            # 2. Jitter признаки (5 признаков)
-            point_process = None
-            try:
-                point_process = parselmouth.praat.call(
-                    sound, 
-                    "To PointProcess (periodic, cc)", 
-                    self.pitch_floor, 
-                    self.pitch_ceiling
-                )
-            except Exception:
-                pass
-
-            if point_process is not None:
-                jitter_methods = [
-                    ("jitter_local", "Get jitter (local)", 0, 0, 0.0001, 0.02, 1.3),
-                    ("jitter_abs", "Get jitter (absolute)", 0, 0, 0.0001, 0.02, 1.3),
-                    ("jitter_rap", "Get jitter (rap)", 0, 0, 0.0001, 0.02, 1.3),
-                    ("jitter_ppq5", "Get jitter (ppq5)", 0, 0, 0.0001, 0.02, 1.3),
-                    ("jitter_ddp", "Get jitter (ddp)", 0, 0, 0.0001, 0.02, 1.3),
-                ]
-                for param_name, method_name, *args in jitter_methods:
-                    try:
-                        value = parselmouth.praat.call(point_process, method_name, *args)
-                        if value is not None and not np.isnan(value) and 0 <= value < 1:
-                            features[param_name] = float(value)
-                        else:
-                            features[param_name] = 0.0
-                    except Exception:
-                        features[param_name] = 0.0
-            else:
-                for param_name in ["jitter_local", "jitter_abs", "jitter_rap", "jitter_ppq5", "jitter_ddp"]:
-                    features[param_name] = 0.0
-
-            # 3. Shimmer признаки (5 признаков)
-            if point_process is not None:
-                shimmer_methods = [
-                    ("shimmer_local", "Get shimmer (local)", 0, 0, 0.0001, 0.02, 1.3, 0.001),
-                    ("shimmer_apq3", "Get shimmer (apq3)", 0, 0, 0.0001, 0.02, 1.3, 0.001),
-                    ("shimmer_apq5", "Get shimmer (apq5)", 0, 0, 0.0001, 0.02, 1.3, 0.001),
-                    ("shimmer_apq11", "Get shimmer (apq11)", 0, 0, 0.0001, 0.02, 1.3, 0.001),
-                    ("shimmer_dda", "Get shimmer (dda)", 0, 0, 0.0001, 0.02, 1.3, 0.001),
-                ]
-                for param_name, method_name, *args in shimmer_methods:
-                    try:
-                        value = parselmouth.praat.call([sound, point_process], method_name, *args)
-                        if value is not None and not np.isnan(value) and 0 <= value < 1:
-                            features[param_name] = float(value)
-                        else:
-                            features[param_name] = 0.0
-                    except Exception:
-                        features[param_name] = 0.0
-            else:
-                for param_name in ["shimmer_local", "shimmer_apq3", "shimmer_apq5", "shimmer_apq11", "shimmer_dda"]:
-                    features[param_name] = 0.0
-            
-            # 4. HNR (2 признака)
+            # 2. HNR
             try:
                 hnr = parselmouth.praat.call(sound, "To Harmonicity (cc)", 0.01, 75, 0.1, 4.5)
                 hnr_values = hnr.values
@@ -200,16 +89,17 @@ class FeatureExtractor:
                 features["hnr_mean"] = 17.0
                 features["hnr_std"] = 3.0
             
-            # 5. Voicing Ratio (1 признак)
+            # 3. Voicing Ratio
             try:
-                pitch = sound.to_pitch(pitch_floor=self.pitch_floor, pitch_ceiling=self.pitch_ceiling)
+                if pitch is None:
+                    pitch = sound.to_pitch(pitch_floor=self.pitch_floor, pitch_ceiling=self.pitch_ceiling)
                 total_frames = pitch.get_number_of_frames()
                 voiced = len(pitch.selected_array["frequency"][pitch.selected_array["frequency"] > 0])
                 features["voicing_ratio"] = float((voiced / total_frames * 100)) if total_frames > 0 else 0.0
             except Exception:
                 features["voicing_ratio"] = 0.0
             
-            # 6. Formants (6 признаков)
+            # 4. Formants
             try:
                 formant = sound.to_formant_burg()
                 times = np.linspace(0.1, sound.xmax - 0.1, 10)
@@ -248,42 +138,95 @@ class FeatureExtractor:
                 features["formant_f2_mean"] = features["formant_f2_cv"] = 1500.0
                 features["formant_f3_mean"] = features["formant_f3_cv"] = 2500.0
             
-            # 7. LGDV признаки (4 признака)
+            # 5. eGeMAPS признаки (через librosa — без временных файлов!)
             if audio_values is not None and sr is not None and LIBROSA_AVAILABLE:
                 try:
-                    rms = librosa.feature.rms(y=audio_values)[0]
-                    silence_thresh = np.mean(rms) * 0.1
-                    silence_frames = np.where(rms < silence_thresh)[0]
+                    values_norm = audio_values / np.max(np.abs(audio_values)) if np.max(np.abs(audio_values)) > 0 else audio_values
+                    D = librosa.amplitude_to_db(np.abs(librosa.stft(values_norm)), ref=np.max)
+                    freqs = librosa.fft_frequencies(sr=sr)
                     
-                    if len(silence_frames) > 1:
-                        silence_durations = np.diff(silence_frames) / sr
-                        total_pause = np.sum(silence_durations)
-                        
-                        features["lgdv_pause_percent"] = float((total_pause / sound.xmax) * 100) if sound.xmax > 0 else 0.0
-                        features["lgdv_pause_rate"] = float(len(silence_durations) / sound.xmax) if sound.xmax > 0 else 0.0
+                    f0_mean = np.mean(voiced_frames) if len(voiced_frames) > 0 else 100.0
+                    
+                    # MFCC
+                    mfccs = librosa.feature.mfcc(y=values_norm, sr=sr, n_mfcc=4)
+                    features["egemaps_22_mfcc1_sma3_amean"] = float(np.mean(mfccs[0]))
+                    features["egemaps_24_mfcc2_sma3_amean"] = float(np.mean(mfccs[1]))
+                    features["egemaps_28_mfcc4_sma3_amean"] = float(np.mean(mfccs[3]))
+                    
+                    # H1-A3
+                    h1_idx = np.argmin(np.abs(freqs - f0_mean)) if len(voiced_frames) > 0 else 0
+                    a3_idx = np.argmin(np.abs(freqs - 2500))
+                    if h1_idx < len(D) and a3_idx < len(D):
+                        h1 = D[h1_idx, :].mean()
+                        a3 = D[a3_idx, :].mean()
+                        h1_a3 = h1 - a3
+                        features["egemaps_38_logRelF0-H1-A3_sma3nz_amean"] = float(h1_a3)
+                        features["egemaps_39_logRelF0-H1-A3_sma3nz_stddevNorm"] = float(np.std([h1_a3]))
                     else:
-                        features["lgdv_pause_percent"] = 0.0
-                        features["lgdv_pause_rate"] = 0.0
+                        features["egemaps_38_logRelF0-H1-A3_sma3nz_amean"] = 0.0
+                        features["egemaps_39_logRelF0-H1-A3_sma3nz_stddevNorm"] = 0.0
                     
-                    mean_rms = np.mean(rms)
-                    features["lgdv_loudness_cv"] = float(np.std(rms) / mean_rms) if mean_rms > 0 else 0.0
+                    # F1 amplitude
+                    f1_band = D[np.argmin(np.abs(freqs - 500)), :].mean()
+                    f0_band = D[np.argmin(np.abs(freqs - f0_mean)), :].mean() if f0_mean > 0 else 0
+                    features["egemaps_44_F1amplitudeLogRelF0_sma3nz_amean"] = float(f1_band)
+                    features["egemaps_45_F1amplitudeLogRelF0_sma3nz_stddevNorm"] = float(np.abs(f1_band - f0_band)) if f0_band != 0 else 0.0
                     
-                    spectral_flux = librosa.onset.onset_strength(y=audio_values, sr=sr)
-                    mean_flux = np.mean(spectral_flux)
-                    features["lgdv_spectral_flux_cv"] = float(np.std(spectral_flux) / mean_flux) if mean_flux > 0 else 0.0
+                    # F2
+                    f2_band = D[np.argmin(np.abs(freqs - 1500)), :].mean()
+                    features["egemaps_48_F2bandwidth_sma3nz_amean"] = float(np.std(D[np.argmin(np.abs(freqs - 1500)), :]))
+                    features["egemaps_50_F2amplitudeLogRelF0_sma3nz_amean"] = float(f2_band)
+                    features["egemaps_51_F2amplitudeLogRelF0_sma3nz_stddevNorm"] = float(np.abs(f2_band - f0_band)) if f0_band != 0 else 0.0
+                    
+                    # F3
+                    f3_band = D[np.argmin(np.abs(freqs - 2500)), :].mean()
+                    features["egemaps_56_F3amplitudeLogRelF0_sma3nz_amean"] = float(f3_band)
+                    features["egemaps_57_F3amplitudeLogRelF0_sma3nz_stddevNorm"] = float(np.abs(f3_band - f0_band)) if f0_band != 0 else 0.0
+                    
+                    # Spectral slope
+                    idx_500 = np.argmin(np.abs(freqs - 500))
+                    idx_1500 = np.argmin(np.abs(freqs - 1500))
+                    if idx_1500 > idx_500:
+                        slope = np.polyfit(freqs[idx_500:idx_1500], D[idx_500:idx_1500].mean(axis=1), 1)[0]
+                        features["egemaps_65_slopeV500-1500_sma3nz_stddevNorm"] = float(np.abs(slope))
+                    else:
+                        features["egemaps_65_slopeV500-1500_sma3nz_stddevNorm"] = 0.0
+                    
+                    # Alpha ratio
+                    features["egemaps_58_alphaRatioV_sma3nz_amean"] = float(np.mean(librosa.feature.spectral_rolloff(y=values_norm, sr=sr)))
+                    
+                    # Sound level
+                    features["egemaps_87_equivalentSoundLevel_dBp"] = float(librosa.power_to_db(np.mean(values_norm**2)))
+                    
                 except Exception:
-                    for k in ["lgdv_pause_percent", "lgdv_pause_rate", "lgdv_loudness_cv", "lgdv_spectral_flux_cv"]:
-                        features[k] = 0.0
+                    # Все eGeMAPS = 0 при ошибке
+                    egemaps_list = [
+                        "egemaps_22_mfcc1_sma3_amean", "egemaps_24_mfcc2_sma3_amean", "egemaps_28_mfcc4_sma3_amean",
+                        "egemaps_38_logRelF0-H1-A3_sma3nz_amean", "egemaps_39_logRelF0-H1-A3_sma3nz_stddevNorm",
+                        "egemaps_44_F1amplitudeLogRelF0_sma3nz_amean", "egemaps_45_F1amplitudeLogRelF0_sma3nz_stddevNorm",
+                        "egemaps_48_F2bandwidth_sma3nz_amean", "egemaps_50_F2amplitudeLogRelF0_sma3nz_amean",
+                        "egemaps_51_F2amplitudeLogRelF0_sma3nz_stddevNorm", "egemaps_56_F3amplitudeLogRelF0_sma3nz_amean",
+                        "egemaps_57_F3amplitudeLogRelF0_sma3nz_stddevNorm", "egemaps_58_alphaRatioV_sma3nz_amean",
+                        "egemaps_65_slopeV500-1500_sma3nz_stddevNorm", "egemaps_87_equivalentSoundLevel_dBp"
+                    ]
+                    for feat in egemaps_list:
+                        if feat not in features:
+                            features[feat] = 0.0
             else:
-                for k in ["lgdv_pause_percent", "lgdv_pause_rate", "lgdv_loudness_cv", "lgdv_spectral_flux_cv"]:
-                    features[k] = 0.0
+                egemaps_list = [
+                    "egemaps_22_mfcc1_sma3_amean", "egemaps_24_mfcc2_sma3_amean", "egemaps_28_mfcc4_sma3_amean",
+                    "egemaps_38_logRelF0-H1-A3_sma3nz_amean", "egemaps_39_logRelF0-H1-A3_sma3nz_stddevNorm",
+                    "egemaps_44_F1amplitudeLogRelF0_sma3nz_amean", "egemaps_45_F1amplitudeLogRelF0_sma3nz_stddevNorm",
+                    "egemaps_48_F2bandwidth_sma3nz_amean", "egemaps_50_F2amplitudeLogRelF0_sma3nz_amean",
+                    "egemaps_51_F2amplitudeLogRelF0_sma3nz_stddevNorm", "egemaps_56_F3amplitudeLogRelF0_sma3nz_amean",
+                    "egemaps_57_F3amplitudeLogRelF0_sma3nz_stddevNorm", "egemaps_58_alphaRatioV_sma3nz_amean",
+                    "egemaps_65_slopeV500-1500_sma3nz_stddevNorm", "egemaps_87_equivalentSoundLevel_dBp"
+                ]
+                for feat in egemaps_list:
+                    if feat not in features:
+                        features[feat] = 0.0
             
-            # 8. eGeMAPS признаки через openSMILE (все 88, потом отфильтруем)
-            if audio_path:
-                egemaps = self.extract_egemaps_features(audio_path)
-                features.update(egemaps)
-            
-            # 9. Spectral признаки
+            # 6. Spectral признаки
             if audio_values is not None and sr is not None and LIBROSA_AVAILABLE:
                 try:
                     if len(audio_values) > 0:
@@ -298,7 +241,7 @@ class FeatureExtractor:
             else:
                 features["spectral_centroid"] = features["spectral_rolloff"] = features["zero_crossing_rate"] = 0.0
             
-            # 10. Duration
+            # 7. Duration
             features["total_duration"] = float(sound.xmax)
             
             features["valid"] = True
