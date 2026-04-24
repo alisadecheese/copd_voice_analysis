@@ -104,6 +104,23 @@ class COPDClassifierMultiModel:
         elif hasattr(self.best_model, 'coef_'):
             return dict(zip(self.feature_names, np.abs(self.best_model.coef_[0])))
         return None
+        # 🔴 СОЗДАНИЕ ГРАФИКОВ И ТАБЛИЦ
+    
+        # 1. Ящики с усами для значимых признаков
+        print("\nСоздание графиков (ящик с усами)...")
+        create_box_plots(X_clean, y, feature_names_clean)
+        
+        # 2. ROC-кривая
+        print("\nСоздание ROC-кривой...")
+        roc_auc, avg_precision = create_roc_curve_plot(y_test, y_proba, "figures")
+        
+        # 3. Таблица 4 (диагностическая точность)
+        print("\nСоздание Таблицы 4...")
+        create_table_4(y_test, y_pred, y_proba)
+        
+        # 4. Таблица 5 (важность признаков)
+        print("\nСоздание Таблицы 5...")
+        create_table_5(X_clean, y, feature_names_clean)
 
     def save(self, path="copd_model.pkl"):
         with open(path, 'wb') as f:
