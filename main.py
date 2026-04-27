@@ -327,25 +327,46 @@ def create_roc_curve_plot(y_test, y_proba, output_dir="figures"):
 def create_table_4(X, y, feature_names, output_file="table_4_feature_selection.xlsx"):
     """
     ТАБЛИЦА 4: Отобранные по двум критериям параметры речи.
-    Используются РЕАЛЬНЫЕ признаки из вашей работы.
+    Как в статье Конюхова и Гаранина.
     """
     from sklearn.feature_selection import f_classif, mutual_info_classif
+    
+    print(f"\nСоздание Таблицы 4 (отбор признаков)...")
+    
+    # 🔴 ПРОВЕРКА входных данных
+    X = np.array(X)
+    y = np.array(y).flatten()
+    
+    if X.ndim == 1:
+        print("  ❌ Ошибка: X должен быть 2D массивом (образцы × признаки)")
+        return None
+    
+    if len(feature_names) != X.shape[1]:
+        print(f"  ⚠️ Warning: len(feature_names)={len(feature_names)} != X.shape[1]={X.shape[1]}")
+        # Если имена не совпадают, создаём временные
+        feature_names = [f"feature_{i}" for i in range(X.shape[1])]
+    
+    print(f"  Признаков: {len(feature_names)}")
     
     rows = []
     
     for i, name in enumerate(feature_names):
+        # 🔴 ПРОВЕРКА: имя признака должно быть строкой
+        if not isinstance(name, str):
+            name = f"feature_{i}"
+        
         try:
-            feature_data = X[:, i:i+1].astype(float)
+            # 🔴 ИСПРАВЛЕНИЕ: правильно извлекаем признак
+            feature_data = X[:, i].astype(float).reshape(-1, 1)
             
             # F-ANOVA
             f_stat, p_val = f_classif(feature_data, y)
             f_score = f_stat[0]
-            f_pvalue = p_val[0]
             
             # Mutual Information
             mi_score = mutual_info_classif(feature_data, y, discrete_features=False, random_state=42)[0]
             
-            # Категоризация F (как в статье)
+            # Категоризация F
             if f_score >= 2.0:
                 f_category = f"Высокая ({f_score:.2f})"
             elif f_score >= 1.0:
@@ -353,7 +374,7 @@ def create_table_4(X, y, feature_names, output_file="table_4_feature_selection.x
             else:
                 f_category = f"Низкая ({f_score:.2f})"
             
-            # Категоризация MI (как в статье)
+            # Категоризация MI
             if mi_score == 0:
                 mi_category = "0.0"
             elif mi_score >= 0.04:
@@ -365,7 +386,7 @@ def create_table_4(X, y, feature_names, output_file="table_4_feature_selection.x
             else:
                 mi_category = f"Слабая ({mi_score:.4f})"
             
-            # Оценка важности (как в статье)
+            # Оценка важности
             if f_score >= 2.0 and mi_score > 0.01:
                 importance = "Лучший компромисс"
             elif mi_score >= 0.04 and f_score < 2.0:
@@ -380,20 +401,29 @@ def create_table_4(X, y, feature_names, output_file="table_4_feature_selection.x
                 importance = "Слабая связь"
             
             rows.append({
-                'Признак': name,  # ✅ ВАШИ реальные признаки
+                'Признак': name,
                 'ANOVA_F': f_category,
                 'Mutual_Info': mi_category,
                 'Важность (по обеим метрикам)': importance
             })
             
-        except Exception:
+        except Exception as e:
+            print(f"  ⚠️ Ошибка в признаке {name}: {e}")
             continue
     
-    # Сортировка: сначала лучшие по совокупности
+    if len(rows) == 0:
+        print("  ❌ Нет данных для таблицы 4!")
+        return None
+    
     df = pd.DataFrame(rows)
+    df = df.sort_values(by=['ANOVA_F', 'Mutual_Info'], ascending=[False, False])
     df.to_excel(output_file, index=False)
     
-    print(f"✓ table_4_feature_selection.xlsx")
+    print(f"  ✅ Table 4 сохранена: {output_file}")
+    print(f"  📊 Всего признаков: {len(df)}")
+    print(f"  🔝 ТОП-3:")
+    for idx, row in df.head(3).iterrows():
+        print(f"     {row['Признак']}: {row['Важность (по обеим метрикам)']}")
     
     return df
 
@@ -637,7 +667,7 @@ def train_pipeline():
     create_roc_curve_plot(y_test, y_proba)
     
     print("\nСоздание Таблицы 4...")
-    create_table_4(y_test, y_pred, y_proba)
+    create_table_4(X_clean, y, feature_names_clean, "table_4_feature_selection.xlsx")
     
     print("\nСоздание Таблицы 5...")
     create_table_5(y_test, y_pred, "table_5_random_forest_results.xlsx")
